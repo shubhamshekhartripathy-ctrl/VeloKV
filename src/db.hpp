@@ -1,5 +1,5 @@
 #pragma once
-
+#include <list>
 #include <string>
 #include <vector>
 #include <deque>
@@ -169,7 +169,7 @@ public:
      *
      * Time Complexity: O(1) average.
      */
-    bool get(const std::string& key, std::string& out_value) const;
+    bool get(const std::string& key, std::string& out_value);
 
     /**
      * @brief Deletes a key of any type.
@@ -317,6 +317,10 @@ private:
     // A key only appears here if it has an explicit TTL.
     mutable std::unordered_map<std::string, int64_t> expiry_;
 
+    // THESE THREE LINES FOR LRU EVICTION CAPACITY POLICY:
+    size_t max_capacity_ = 31; 
+    std::list<std::string> lru_order_;
+    std::unordered_map<std::string, std::list<std::string>::iterator> lru_position_;
     /**
      * @brief Checks whether a key's TTL has elapsed; evicts if expired.
      *

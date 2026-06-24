@@ -1,5 +1,4 @@
 #include "db.hpp"
-
 // std::erase_if is C++20; we use the manual two-pass approach (collect + erase)
 // for GCC 6.3 / C++17 compatibility throughout this file.
 
@@ -30,6 +29,15 @@ bool Database::is_expired(const std::string& key) const {
         string_store_.erase(key);
         list_store_.erase(key);
         expiry_.erase(it);
+        // 🚨 CAST to non-const to satisfy the compiler's strictness
+        auto& mutable_lru_order = const_cast<std::list<std::string>&>(lru_order_);
+        auto& mutable_lru_pos = const_cast<std::unordered_map<std::string, std::list<std::string>::iterator>&>(lru_position_);
+        //  SAFE FOR CONST FUNCTIONS: Use .find() instead of []
+        auto lru_it = mutable_lru_pos.find(key);
+        if (lru_it != mutable_lru_pos.end()) {
+            mutable_lru_order.erase(lru_it->second);
+            mutable_lru_pos.erase(lru_it);
+        }
         return true;
     }
 
@@ -54,31 +62,56 @@ KeyType Database::type_of(const std::string& key) const {
 // ---------------------------------------------------------------------------
 
 void Database::set(const std::string& key, const std::string& value) {
-    // Remove any existing list entry for this key.
-    // Redis SET is an unconditional overwrite: "SET key value … Any previous
-    // time to live associated with the key is discarded on successful SET operation."
-    // The same logic applies to type: SET replaces a list key with a string key.
+    // 1. Remove any existing list/string entries and clear TTL
     list_store_.erase(key);
-
-    string_store_[key] = value;
-
-    // Clear TTL (SET resets expiry per Redis spec).
     expiry_.erase(key);
+
+    // If it's a completely NEW key, handle LRU capacity
+    if (string_store_.find(key) == string_store_.end()) {
+        // Check if we hit our max memory limit (31)
+        while (string_store_.size() + list_store_.size() >= max_capacity_) {
+            // Get the least recently used key from the tail of your LRU list
+            std::string evicted_key = lru_order_.back();
+            
+            // Purge the evicted key from EVERY storage map
+            string_store_.erase(evicted_key);
+            list_store_.erase(evicted_key);
+            expiry_.erase(evicted_key);
+            lru_position_.erase(evicted_key);
+            
+            lru_order_.pop_back(); // Remove from tracking list
+        }
+        
+        // Insert new key into the front of the LRU tracking list
+        lru_order_.push_front(key);
+        lru_position_[key] = lru_order_.begin();
+    } else {
+        // If the key already existed as a string, just move it to the front (MRU)
+        lru_order_.erase(lru_position_[key]);
+        lru_order_.push_front(key);
+        lru_position_[key] = lru_order_.begin();
+    }
+
+    // 2. Perform the actual data write
+    string_store_[key] = value;
 }
 
-bool Database::get(const std::string& key, std::string& out_value) const {
-    // Lazy expiry first.
+// 1. Remove "const" from the end of the signature
+bool Database::get(const std::string& key, std::string& out_value) {
     if (is_expired(key)) return false;
 
     auto it = string_store_.find(key);
-    if (it == string_store_.end()) {
-        // Key absent or exists as a List type — both return false.
-        // The command handler is responsible for returning the WRONGTYPE error
-        // when appropriate; here we simply signal "not a string value".
-        return false;
-    }
+    if (it == string_store_.end()) return false;
 
     out_value = it->second;
+
+    // 🚨 UPDATE LRU ORDER: Move the accessed key to the front (Most Recently Used)
+    if (lru_position_.count(key)) {
+        lru_order_.erase(lru_position_[key]);
+        lru_order_.push_front(key);
+        lru_position_[key] = lru_order_.begin();
+    }
+
     return true;
 }
 
