@@ -1,0 +1,9 @@
+REDIS-CLONE-RDB v2
+S persist_str -1 hello
+S strkey -1 hello
+L jobs -1 1 job1
+L fifo -1 1 msg3
+L persist_list -1 3 one two three
+L listkey -1 1 v
+L tlist 1782267304783 1 item
+EOF
