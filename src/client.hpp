@@ -24,6 +24,20 @@ public:
     socket_t fd() const { return fd_; }
 
     /**
+     * @brief Releases ownership of the socket FD without closing it.
+     *
+     * After calling this, fd_ is set to INVALID_SOCKET_VAL so the Client
+     * destructor will NOT close the socket.  The caller takes ownership.
+     *
+     * Used by Server::handle_client_read() when promoting a client connection
+     * to a replica: the FD is stolen here, the Client is erased from the map
+     * (destructor runs safely), then the FD is handed to ReplicationManager.
+     *
+     * @return The original socket FD.
+     */
+    socket_t release();
+
+    /**
      * @brief Reads data from socket into the input buffer.
      * @return true if successful (including WOULDBLOCK), false if connection closed or error.
      */

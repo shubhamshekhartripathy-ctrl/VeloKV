@@ -5,6 +5,7 @@
 #include "command.hpp"
 #include "db.hpp"
 #include "persistence.hpp"
+#include "replication.hpp"
 #include <string>
 #include <unordered_map>
 #include <atomic>
@@ -16,29 +17,51 @@ namespace redis {
  * @class Server
  * @brief Single-threaded, select()-based TCP event loop.
  *
- * DESIGN NOTES (Milestone 3 additions):
+ * MILESTONE 8 ADDITIONS — Replication integration:
  *
- * 1. PERSISTENCE LIFECYCLE:
- *    - On startup (init()):  PersistenceManager::load() reloads the last saved state.
- *    - On shutdown (stop()): PersistenceManager::save() flushes state to disk.
- *    - On demand (SAVE cmd): The command handler in command.cpp calls save() directly.
+ * 1. NODE ROLE:
+ *    The Server can operate in one of three roles:
+ *      Standalone — classic single-node mode (no replication, default).
+ *      Leader     — accepts all writes, propagates each write to all replicas.
+ *      Replica    — read-only; refuses client writes with READONLY error.
  *
- * 2. ACTIVE EVICTION:
- *    The event loop increments loop_tick_ on every iteration. When it reaches
- *    kEvictionInterval, db_.evict_expired() is called and the counter resets.
- *    This provides a low-overhead periodic sweep without requiring a separate thread.
+ * 2. REPLICATION MANAGER:
+ *    An optional ReplicationManager* is stored as repl_mgr_.  When present:
+ *      - Its sockets are added to the select() fd_sets each iteration.
+ *      - handle_client_read() detects the REPLICAOF handshake and promotes
+ *        the connection from a regular client to a replica.
+ *      - After executing a write command (leader mode), the command is
+ *        propagated to replicas via repl_mgr_->propagate().
+ *      - Replica mode: write commands from external clients return READONLY.
  *
- * 3. DATABASE FILE:
- *    kDbPath defines the persistence file name. It is created in the working
- *    directory where the server binary is launched.
+ * 3. CLIENT FD PROMOTION PATTERN:
+ *    When the REPLICAOF handshake is detected, we must "steal" the socket FD
+ *    from the Client object before erasing it (so the Client destructor does
+ *    not close the socket).  Client::release() implements this pattern.
+ *
+ * 4. RDB PATH:
+ *    The persistence file path is now a constructor parameter (default
+ *    "redis.rdb").  This allows leader and replica to use different files
+ *    when running in the same working directory.
  */
 class Server {
 public:
-    Server(const std::string& host, int port);
+    /**
+     * @param host      Bind address (e.g. "127.0.0.1").
+     * @param port      Bind port (e.g. 6379).
+     * @param role      Node role; determines replication behaviour.
+     * @param repl_mgr  Optional replication manager.  nullptr = standalone.
+     * @param rdb_path  Path for the persistence file (default "redis.rdb").
+     */
+    Server(const std::string& host, int port,
+           NodeRole           role     = NodeRole::Standalone,
+           ReplicationManager* repl_mgr = nullptr,
+           const std::string& rdb_path = "redis.rdb");
+
     ~Server();
 
     // Non-copyable: socket ownership is not shared.
-    Server(const Server&) = delete;
+    Server(const Server&)            = delete;
     Server& operator=(const Server&) = delete;
 
     /**
@@ -58,22 +81,26 @@ public:
     void stop();
 
 private:
-    std::string       host_;
-    int               port_;
-    socket_t          listen_fd_;
-    std::atomic<bool> running_;
+    std::string        host_;
+    int                port_;
+    socket_t           listen_fd_;
+    std::atomic<bool>  running_;
 
     // Core in-memory storage engine.
-    Database db_;
+    Database           db_;
 
     // Command dispatch registry.
-    CommandProcessor processor_;
+    CommandProcessor   processor_;
 
     // Active client sessions keyed by socket descriptor.
     std::unordered_map<socket_t, Client> clients_;
 
-    // Persistence file path (relative to working directory).
-    static constexpr const char* kDbPath = "redis.rdb";
+    // Replication state.
+    NodeRole            role_;
+    ReplicationManager* repl_mgr_;   ///< Non-owning pointer; lifetime managed by main().
+
+    // Persistence file path.
+    std::string rdb_path_;
 
     // How many event loop iterations between active expiry sweeps.
     // At 100ms select() timeout → 100 iterations ≈ 10 seconds between sweeps.

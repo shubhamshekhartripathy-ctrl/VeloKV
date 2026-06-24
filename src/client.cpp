@@ -33,6 +33,13 @@ Client& Client::operator=(Client&& other) noexcept {
     return *this;
 }
 
+socket_t Client::release() {
+    // Transfer ownership: set fd_ to invalid so ~Client() skips close_socket().
+    socket_t released = fd_;
+    fd_ = INVALID_SOCKET_VAL;
+    return released;
+}
+
 bool Client::read_from_socket() {
     char buf[4096];
     

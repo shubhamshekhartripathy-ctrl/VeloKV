@@ -15,13 +15,14 @@ else
 endif
 
 # Source and object files
-SRCS = src/common.cpp     \
-       src/db.cpp         \
-       src/persistence.cpp \
-       src/resp.cpp       \
-       src/command.cpp    \
-       src/client.cpp     \
-       src/server.cpp     \
+SRCS = src/common.cpp      \
+       src/db.cpp           \
+       src/persistence.cpp  \
+       src/resp.cpp         \
+       src/command.cpp      \
+       src/client.cpp       \
+       src/replication.cpp  \
+       src/server.cpp       \
        src/main.cpp
 
 OBJS = $(SRCS:.cpp=.o)

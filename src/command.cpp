@@ -347,4 +347,31 @@ void CommandProcessor::register_builtin_commands() {
     });
 }
 
+// ---------------------------------------------------------------------------
+// is_write_command — free function for replication / READONLY enforcement
+// ---------------------------------------------------------------------------
+
+/**
+ * @brief Returns true if `name` is a data-modifying command.
+ *
+ * INTERVIEW NOTE:
+ * Redis categorises commands with a 'flags' bitmask in its command table:
+ *   write   — modifies data (needs propagation to replicas)
+ *   read    — only reads data (safe to serve from replicas)
+ *   admin   — administrative command
+ * We implement a simpler boolean for the write flag subset.
+ *
+ * The static set is initialised once on first call (thread-safe in C++11+).
+ */
+bool is_write_command(const std::string& name) {
+    static const std::unordered_set<std::string> kWriteCommands = {
+        "SET", "DEL", "EXPIRE", "LPUSH", "RPUSH", "LPOP", "RPOP"
+    };
+    std::string upper = name;
+    for (char& c : upper) {
+        c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    }
+    return kWriteCommands.count(upper) > 0;
+}
+
 } // namespace redis

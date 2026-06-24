@@ -3,19 +3,36 @@
 #include <iostream>
 #include <vector>
 #include <cstring>
+#include <cctype>
 
 namespace redis {
+
+// ---------------------------------------------------------------------------
+// Helper: uppercase a string in-place (used for command-name comparison)
+// ---------------------------------------------------------------------------
+
+static std::string str_upper(std::string s) {
+    for (char& c : s) {
+        c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    }
+    return s;
+}
 
 // ---------------------------------------------------------------------------
 // Constructor / Destructor
 // ---------------------------------------------------------------------------
 
-Server::Server(const std::string& host, int port)
-    : host_(host), port_(port), listen_fd_(INVALID_SOCKET_VAL), running_(false) {}
+Server::Server(const std::string& host, int port,
+               NodeRole role, ReplicationManager* repl_mgr,
+               const std::string& rdb_path)
+    : host_(host), port_(port),
+      listen_fd_(INVALID_SOCKET_VAL), running_(false),
+      role_(role), repl_mgr_(repl_mgr),
+      rdb_path_(rdb_path)
+{}
 
 Server::~Server() {
-    // stop() is idempotent — calling it from both stop() and ~Server() is safe.
-    stop();
+    stop(); // idempotent — saves DB, sets running_ = false
     if (listen_fd_ != INVALID_SOCKET_VAL) {
         close_socket(listen_fd_);
     }
@@ -76,7 +93,8 @@ bool Server::init() {
 
     if (bind(listen_fd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == SOCKET_ERROR_VAL) {
         std::cerr << "[Server] ERROR: Failed to bind to "
-                  << host_ << ":" << port_ << " — " << get_last_error_string() << std::endl;
+                  << host_ << ":" << port_ << " — "
+                  << get_last_error_string() << std::endl;
         close_socket(listen_fd_);
         listen_fd_ = INVALID_SOCKET_VAL;
         return false;
@@ -84,40 +102,36 @@ bool Server::init() {
 
     // ── 5. Listen ─────────────────────────────────────────────────────────
     if (listen(listen_fd_, SOMAXCONN) == SOCKET_ERROR_VAL) {
-        std::cerr << "[Server] ERROR: Failed to listen: " << get_last_error_string() << std::endl;
+        std::cerr << "[Server] ERROR: Failed to listen: "
+                  << get_last_error_string() << std::endl;
         close_socket(listen_fd_);
         listen_fd_ = INVALID_SOCKET_VAL;
         return false;
     }
 
-    std::cout << "[Server] Listening on " << host_ << ":" << port_ << std::endl;
+    const char* role_name =
+        (role_ == NodeRole::Leader)   ? "LEADER"   :
+        (role_ == NodeRole::Replica)  ? "REPLICA"  : "STANDALONE";
+    std::cout << "[Server] Listening on " << host_ << ":" << port_
+              << "  (role: " << role_name << ")" << std::endl;
 
     // ── 6. Load persisted database ────────────────────────────────────────
-    // This is done AFTER the socket is ready so the server is as close to
-    // "serving" as possible when data is loaded (minimises the window where
-    // the port is open but data is unavailable).
-    //
-    // INTERVIEW NOTE: Real Redis loads the RDB/AOF file before the socket is
-    // opened (so clients can never connect to an empty database). Either
-    // ordering is defensible; loading before bind is strictly safer.
-    std::cout << "[Server] Loading database from '" << kDbPath << "'..." << std::endl;
-    LoadResult result = PersistenceManager::load(db_, kDbPath);
-
+    std::cout << "[Server] Loading database from '" << rdb_path_ << "'..." << std::endl;
+    LoadResult result = PersistenceManager::load(db_, rdb_path_);
     if (!result.success) {
-        // A load failure is non-fatal — we log it and start with an empty DB.
-        // In a production system you might choose to abort here.
-        std::cerr << "[Server] WARNING: Database load failed: " << result.error << std::endl;
+        std::cerr << "[Server] WARNING: Database load failed: "
+                  << result.error << std::endl;
     }
 
     return true;
 }
 
 // ---------------------------------------------------------------------------
-// start() — select() event loop with periodic active eviction
+// start() — select() event loop with replication integration
 // ---------------------------------------------------------------------------
 
 void Server::start() {
-    running_ = true;
+    running_   = true;
     loop_tick_ = 0;
     std::cout << "[Server] Event loop started." << std::endl;
 
@@ -131,21 +145,26 @@ void Server::start() {
         FD_SET(listen_fd_, &read_fds);
         socket_t max_fd = listen_fd_;
 
+        // Add client sockets.
         for (const auto& pair : clients_) {
-            socket_t fd     = pair.first;
+            socket_t      fd     = pair.first;
             const Client& client = pair.second;
             FD_SET(fd, &read_fds);
             if (client.has_pending_write()) {
                 FD_SET(fd, &write_fds);
             }
-            if (fd > max_fd) {
-                max_fd = fd;
-            }
+            if (fd > max_fd) max_fd = fd;
+        }
+
+        // Add replication sockets (replica FDs on leader; leader FD on replica).
+        // INTERVIEW NOTE: By adding replication FDs to the SAME select() call we
+        // avoid any extra threads or synchronisation primitives.  The event loop
+        // handles client I/O and replication I/O in the same polling round.
+        if (repl_mgr_ != nullptr) {
+            repl_mgr_->register_fds(read_fds, write_fds, max_fd);
         }
 
         // ── select() with 100ms timeout ───────────────────────────────────
-        // The timeout lets us check running_ periodically (for clean SIGINT shutdown)
-        // and drive the eviction tick counter without a background thread.
         timeval tv;
         tv.tv_sec  = 0;
         tv.tv_usec = 100000; // 100ms
@@ -155,16 +174,12 @@ void Server::start() {
 
         if (activity < 0) {
             if (is_would_block()) continue;
-            std::cerr << "[Server] ERROR: select() failed: " << get_last_error_string() << std::endl;
+            std::cerr << "[Server] ERROR: select() failed: "
+                      << get_last_error_string() << std::endl;
             break;
         }
 
-        // ── Active expiry sweep (periodic) ────────────────────────────────
-        // INTERVIEW NOTE:
-        // We drive this from the event loop tick rather than a separate timer thread.
-        // This avoids any synchronisation overhead (mutexes, condition variables)
-        // since the server is single-threaded. The sweep frequency is:
-        //   kEvictionInterval × select_timeout = 100 × 100ms = ~10 seconds.
+        // ── Periodic active expiry sweep ──────────────────────────────────
         ++loop_tick_;
         if (loop_tick_ >= kEvictionInterval) {
             db_.evict_expired();
@@ -172,17 +187,21 @@ void Server::start() {
         }
 
         if (activity == 0) {
-            // select() timed out — no socket events this iteration.
+            // Timeout — no socket events.  Still drive reconnect logic.
+            if (repl_mgr_ != nullptr && role_ == NodeRole::Replica) {
+                repl_mgr_->try_reconnect(db_);
+            }
             continue;
         }
 
-        // ── Handle new incoming connections ───────────────────────────────
+        // ── New client connections ────────────────────────────────────────
         if (FD_ISSET(listen_fd_, &read_fds)) {
             handle_new_connection();
         }
 
-        // ── Handle read/write events on existing clients ──────────────────
-        // Copy the fd list to avoid iterator invalidation when a client disconnects.
+        // ── Existing client reads/writes ──────────────────────────────────
+        // Snapshot fd list to avoid iterator invalidation when a client is
+        // disconnected or promoted to a replica inside the loop.
         std::vector<socket_t> active_fds;
         active_fds.reserve(clients_.size());
         for (const auto& pair : clients_) {
@@ -194,6 +213,8 @@ void Server::start() {
 
             if (FD_ISSET(fd, &read_fds)) {
                 handle_client_read(fd);
+                // After handle_client_read(), the client may have been removed
+                // (disconnected or promoted to replica).  Re-check before write.
             }
 
             if (clients_.find(fd) == clients_.end()) continue;
@@ -202,35 +223,68 @@ void Server::start() {
                 handle_client_write(fd);
             }
         }
+
+        // ── Replication I/O ───────────────────────────────────────────────
+        if (repl_mgr_ != nullptr) {
+
+            if (role_ == NodeRole::Leader) {
+                // Snapshot replica FDs — flush/read may remove replicas, which
+                // would invalidate iterators inside ReplicationManager.
+                std::vector<socket_t> rfds = repl_mgr_->replica_fds();
+
+                for (socket_t rfd : rfds) {
+                    // Check read first: detect disconnect before attempting write.
+                    bool still_alive = true;
+                    if (FD_ISSET(rfd, &read_fds)) {
+                        still_alive = repl_mgr_->handle_replica_read(rfd);
+                        // handle_replica_read() calls remove_replica() internally
+                        // if the replica disconnected.
+                    }
+                    if (still_alive && FD_ISSET(rfd, &write_fds)) {
+                        if (!repl_mgr_->flush_replica(rfd)) {
+                            repl_mgr_->remove_replica(rfd);
+                        }
+                    }
+                }
+
+            } else if (role_ == NodeRole::Replica) {
+                socket_t lfd = repl_mgr_->leader_fd();
+                if (lfd != INVALID_SOCKET_VAL && FD_ISSET(lfd, &read_fds)) {
+                    // Read and apply leader's replication stream.
+                    repl_mgr_->read_from_leader(db_);
+                }
+                // Attempt reconnect if the leader connection dropped.
+                if (!repl_mgr_->is_connected()) {
+                    repl_mgr_->try_reconnect(db_);
+                }
+            }
+        }
     }
 
     std::cout << "[Server] Event loop stopped." << std::endl;
 }
 
 // ---------------------------------------------------------------------------
-// stop() — signals the loop to exit and saves the database
+// stop() — signal exit and save database
 // ---------------------------------------------------------------------------
 
 void Server::stop() {
     if (!running_.exchange(false)) {
-        // Already stopped — avoid double-save.
-        return;
+        return; // Already stopped — avoid double-save.
     }
 
-    // INTERVIEW NOTE:
-    // We save here rather than in the destructor to ensure the save happens
-    // while the Database object is still fully alive and before any member
-    // destructors have run. Saving inside ~Server() would work in this codebase
-    // but is an anti-pattern in more complex class hierarchies.
-    std::cout << "[Server] Saving database to '" << kDbPath << "'..." << std::endl;
-    bool ok = PersistenceManager::save(db_, kDbPath);
+    // INTERVIEW NOTE: We save here (not in ~Server()) to ensure the Database
+    // is still fully alive when we serialise it.  Saving inside the destructor
+    // risks reading partially-destructed member objects.
+    std::cout << "[Server] Saving database to '" << rdb_path_ << "'..." << std::endl;
+    bool ok = PersistenceManager::save(db_, rdb_path_);
     if (!ok) {
         std::cerr << "[Server] ERROR: Failed to save database on shutdown." << std::endl;
     }
 }
 
 // ---------------------------------------------------------------------------
-// Private connection handlers
+// Private: handle_new_connection()
 // ---------------------------------------------------------------------------
 
 void Server::handle_new_connection() {
@@ -244,12 +298,14 @@ void Server::handle_new_connection() {
 
         if (client_fd == INVALID_SOCKET_VAL) {
             if (is_would_block()) break;
-            std::cerr << "[Server] ERROR: accept() failed: " << get_last_error_string() << std::endl;
+            std::cerr << "[Server] ERROR: accept() failed: "
+                      << get_last_error_string() << std::endl;
             break;
         }
 
         if (!set_nonblocking(client_fd)) {
-            std::cerr << "[Server] ERROR: Failed to set client socket non-blocking. Dropping." << std::endl;
+            std::cerr << "[Server] ERROR: Failed to set client socket non-blocking. Dropping."
+                      << std::endl;
             close_socket(client_fd);
             continue;
         }
@@ -261,14 +317,19 @@ void Server::handle_new_connection() {
         inet_ntop(AF_INET, &client_addr.sin_addr, ip_str, INET_ADDRSTRLEN);
 #endif
         int client_port = ntohs(client_addr.sin_port);
-        std::cout << "[Server] New connection from " << ip_str << ":" << client_port
-                  << " (fd: " << client_fd << ")" << std::endl;
+        std::cout << "[Server] New connection from "
+                  << ip_str << ":" << client_port
+                  << " (fd=" << client_fd << ")" << std::endl;
 
         clients_.emplace(std::piecewise_construct,
                          std::forward_as_tuple(client_fd),
                          std::forward_as_tuple(client_fd));
     }
 }
+
+// ---------------------------------------------------------------------------
+// Private: handle_client_read()
+// ---------------------------------------------------------------------------
 
 void Server::handle_client_read(socket_t fd) {
     auto it = clients_.find(fd);
@@ -282,20 +343,79 @@ void Server::handle_client_read(socket_t fd) {
     }
 
     std::vector<Command> commands;
-    if (RESPParser::parse(client.input_buffer(), commands)) {
-        for (const auto& cmd : commands) {
-            std::string response = processor_.execute(cmd, db_);
-            if (!response.empty()) {
-                client.queue_response(response);
-            }
+    if (!RESPParser::parse(client.input_buffer(), commands)) return;
+
+    for (const auto& cmd : commands) {
+        if (cmd.empty()) continue;
+
+        std::string cmd_name = str_upper(cmd[0]);
+
+        // ── Detect REPLICAOF handshake (leader only) ──────────────────────
+        // A downstream replica's very first message is "REPLICAOF self self\r\n".
+        // We promote the connection from a regular client to a replica slot in
+        // ReplicationManager, which immediately queues a full-sync payload.
+        //
+        // PROMOTION SEQUENCE (important: order matters):
+        //   1. client.release()   — steals fd_; ~Client() will NOT close socket.
+        //   2. clients_.erase(it) — destroys Client safely (fd_ is INVALID).
+        //   3. add_replica(rfd)   — ReplicationManager now owns the socket.
+        //   4. return             — do NOT use `client` or `it` after erase.
+        //
+        // INTERVIEW NOTE: Real Redis has a dedicated replica port and a separate
+        // registration command (REPLCONF).  We use a single-port approach with
+        // a magic keyword for simplicity.
+        if (cmd_name == "REPLICAOF" && role_ == NodeRole::Leader && repl_mgr_ != nullptr) {
+            std::cout << "[Server] Replica handshake on fd=" << fd
+                      << ". Promoting to replica connection." << std::endl;
+
+            socket_t rfd = client.release(); // Step 1: steal the fd.
+            clients_.erase(it);              // Step 2: safe destructor (fd_ = INVALID).
+            repl_mgr_->add_replica(rfd, db_); // Step 3: ReplicationManager takes over.
+            return;                           // Step 4: it / client are dangling — exit.
         }
 
-        // Attempt immediate flush — remainder goes on next writeable select event.
+        // ── READONLY guard (replica rejects client writes) ─────────────────
+        // INTERVIEW NOTE: Redis returns this exact error string on write commands
+        // issued to a replica.  Clients should direct all writes to the leader.
+        if (role_ == NodeRole::Replica && is_write_command(cmd_name)) {
+            client.queue_response(RESPParser::serialize_error(
+                "READONLY You can't write against a read only replica."));
+            continue;
+        }
+
+        // ── Execute command ────────────────────────────────────────────────
+        std::string response = processor_.execute(cmd, db_);
+        if (!response.empty()) {
+            client.queue_response(response);
+        }
+
+        // ── Propagate write commands to replicas (leader only) ─────────────
+        // We propagate AFTER local execution.  This means the leader stores the
+        // write before sending it to replicas — so even if a replica is slow,
+        // the local state is consistent.
+        //
+        // INTERVIEW NOTE: Real Redis also propagates after local execution.
+        // It does NOT wait for replicas to acknowledge before replying to the
+        // client (async replication).  WAIT command can force synchronous acks.
+        if (role_ == NodeRole::Leader && repl_mgr_ != nullptr && is_write_command(cmd_name)) {
+            repl_mgr_->propagate(cmd);
+        }
+    }
+
+    // Flush queued responses to the client socket.
+    // Re-check that the client is still in the map — the REPLICAOF branch above
+    // erases it and returns early, but another command in the same batch might
+    // have caused a disconnect.
+    if (clients_.find(fd) != clients_.end()) {
         if (!client.write_to_socket()) {
             disconnect_client(fd);
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Private: handle_client_write()
+// ---------------------------------------------------------------------------
 
 void Server::handle_client_write(socket_t fd) {
     auto it = clients_.find(fd);
@@ -306,8 +426,12 @@ void Server::handle_client_write(socket_t fd) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Private: disconnect_client()
+// ---------------------------------------------------------------------------
+
 void Server::disconnect_client(socket_t fd) {
-    std::cout << "[Server] Client disconnected (fd: " << fd << ")" << std::endl;
+    std::cout << "[Server] Client disconnected (fd=" << fd << ")" << std::endl;
     clients_.erase(fd); // Triggers ~Client(), which closes the socket.
 }
 

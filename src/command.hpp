@@ -3,6 +3,7 @@
 #include <string>
 #include <vector>
 #include <unordered_map>
+#include <unordered_set>
 #include <functional>
 #include "db.hpp"
 
@@ -39,5 +40,21 @@ private:
     // Registers all standard commands (e.g., PING)
     void register_builtin_commands();
 };
+
+
+/**
+ * @brief Returns true if the command name is a data-modifying write operation.
+ *
+ * Used by:
+ *  1. Server (leader mode): propagate the command to replicas after execution.
+ *  2. Server (replica mode): reject the command from clients with READONLY error.
+ *
+ * The check is case-insensitive. Commands NOT in this list (GET, EXISTS, TTL,
+ * LLEN, PING, SAVE) are read-only and safe to execute on replicas.
+ *
+ * @param name Command name (any case, e.g. "set", "SET", "Set").
+ * @return true if the command modifies the database.
+ */
+bool is_write_command(const std::string& name);
 
 } // namespace redis
