@@ -67,10 +67,6 @@ void CommandProcessor::register_builtin_commands() {
     // Stores a key-value pair. Resets any existing TTL on the key.
     // Usage: SET <key> <value>
     //
-    // INTERVIEW NOTE:
-    // Real Redis SET accepts optional modifiers like EX, PX, NX, XX, KEEPTTL.
-    // For this clone we implement the base form. The Database::set() method
-    // already clears any existing TTL, matching Redis semantics.
     register_handler("SET", [](const std::vector<std::string>& args, Database& db) -> std::string {
         if (args.size() != 3) {
             return RESPParser::serialize_error(
@@ -91,9 +87,6 @@ void CommandProcessor::register_builtin_commands() {
                 "ERR wrong number of arguments for 'get' command");
         }
         // WRONGTYPE check: GET only works on string keys.
-        // INTERVIEW NOTE: Real Redis returns this exact error string (the RESP
-        // error prefix '-WRONGTYPE') when a command is applied to a key holding
-        // a different data type than expected.
         if (db.type_of(args[1]) == KeyType::List) {
             return RESPParser::serialize_error(
                 "WRONGTYPE Operation against a key holding the wrong kind of value");
@@ -132,16 +125,6 @@ void CommandProcessor::register_builtin_commands() {
     // ── EXPIRE ────────────────────────────────────────────────────────────
     // Sets a TTL of N seconds on an existing key.
     //
-    // INTERVIEW NOTE:
-    // Real Redis uses seconds as the unit for EXPIRE and milliseconds for PEXPIRE.
-    // We follow the same convention here: EXPIRE <key> <seconds>.
-    // Internally we store millisecond-precision deadlines to allow future PEXPIRE.
-    //
-    // Return value:
-    //   :1  — TTL was set (key exists and is live).
-    //   :0  — Key does not exist (or is already expired); no TTL was set.
-    //
-    // Usage: EXPIRE <key> <seconds>
     register_handler("EXPIRE", [](const std::vector<std::string>& args, Database& db) -> std::string {
         if (args.size() != 3) {
             return RESPParser::serialize_error(
@@ -169,16 +152,6 @@ void CommandProcessor::register_builtin_commands() {
     // ── TTL ───────────────────────────────────────────────────────────────
     // Returns the remaining TTL for a key, in seconds.
     //
-    // INTERVIEW NOTE: Return-value conventions (matching real Redis):
-    //   >= 0  — remaining seconds until expiry.
-    //   -1    — key exists but has no TTL (persists forever).
-    //   -2    — key does not exist or has already expired.
-    //
-    // We call db.ttl() which returns milliseconds, then round to seconds.
-    // Using integer division rounds down, which is the correct behaviour
-    // (1900ms remaining → "1 second" TTL, not "2 seconds").
-    //
-    // Usage: TTL <key>
     register_handler("TTL", [](const std::vector<std::string>& args, Database& db) -> std::string {
         if (args.size() != 2) {
             return RESPParser::serialize_error(
@@ -202,12 +175,6 @@ void CommandProcessor::register_builtin_commands() {
     // ── SAVE ──────────────────────────────────────────────────────────────
     // Triggers a manual, synchronous save of the database to disk.
     //
-    // INTERVIEW NOTE:
-    // Real Redis has both SAVE (blocking) and BGSAVE (background, fork-based).
-    // We implement the blocking variant — appropriate for a single-threaded server
-    // where we can't safely fork or spawn threads without a full threading model.
-    //
-    // Usage: SAVE
     static constexpr const char* kDbPath = "redis.rdb";
     register_handler("SAVE", [](const std::vector<std::string>& args, Database& db) -> std::string {
         if (args.size() != 1) {
@@ -234,15 +201,6 @@ void CommandProcessor::register_builtin_commands() {
     // Inserts value at the HEAD (left/front) of the list stored at key.
     // Creates the list if the key does not exist.
     //
-    // INTERVIEW NOTE:
-    //   LPUSH mylist c  → [c]         (list created)
-    //   LPUSH mylist b  → [b, c]
-    //   LPUSH mylist a  → [a, b, c]   ← a is now the HEAD
-    // The element pushed last ends up at the front. This is the expected "stack"  
-    // behaviour when used with LPOP.
-    //
-    // Return value: integer — new length of the list.
-    // Usage: LPUSH key value
     register_handler("LPUSH", [](const std::vector<std::string>& args, Database& db) -> std::string {
         if (args.size() != 3) {
             return RESPParser::serialize_error(
@@ -259,14 +217,6 @@ void CommandProcessor::register_builtin_commands() {
     // Inserts value at the TAIL (right/back) of the list stored at key.
     // Creates the list if the key does not exist.
     //
-    // INTERVIEW NOTE:
-    //   RPUSH mylist a  → [a]
-    //   RPUSH mylist b  → [a, b]
-    //   RPUSH mylist c  → [a, b, c]   ← c is now the TAIL
-    // This is natural queue (FIFO) insertion when used with LPOP.
-    //
-    // Return value: integer — new length of the list.
-    // Usage: RPUSH key value
     register_handler("RPUSH", [](const std::vector<std::string>& args, Database& db) -> std::string {
         if (args.size() != 3) {
             return RESPParser::serialize_error(
@@ -327,13 +277,6 @@ void CommandProcessor::register_builtin_commands() {
     // ── LLEN ──────────────────────────────────────────────────────────────
     // Returns the number of elements in the list stored at key.
     //
-    // INTERVIEW NOTE:
-    //   - Returns 0 (not an error) if the key does not exist — matches real Redis.
-    //   - WRONGTYPE error if the key exists and holds a string.
-    //   - O(1): std::deque::size() is constant time.
-    //
-    // Return value: integer — list length.
-    // Usage: LLEN key
     register_handler("LLEN", [](const std::vector<std::string>& args, Database& db) -> std::string {
         if (args.size() != 2) {
             return RESPParser::serialize_error(
@@ -354,14 +297,6 @@ void CommandProcessor::register_builtin_commands() {
 /**
  * @brief Returns true if `name` is a data-modifying command.
  *
- * INTERVIEW NOTE:
- * Redis categorises commands with a 'flags' bitmask in its command table:
- *   write   — modifies data (needs propagation to replicas)
- *   read    — only reads data (safe to serve from replicas)
- *   admin   — administrative command
- * We implement a simpler boolean for the write flag subset.
- *
- * The static set is initialised once on first call (thread-safe in C++11+).
  */
 bool is_write_command(const std::string& name) {
     static const std::unordered_set<std::string> kWriteCommands = {

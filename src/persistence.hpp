@@ -36,31 +36,6 @@ struct LoadResult {
  *    flags). This guarantees that a power failure during save never leaves a corrupt
  *    or partially-written .rdb file — the old file remains intact.
  *
- *    INTERVIEW NOTE: This is the same technique used by SQLite's journal mode,
- *    PostgreSQL's WAL, and Redis itself.
- *
- * 3. FILE FORMAT — Version 2 (human-readable text with type prefix):
- *    Each record line is prefixed with a single type character:
- *
- *    ┌────────────────────────────────────────┐
- *    │ REDIS-CLONE-RDB v2                     │  ← magic header
- *    │ S city -1 Rome                         │  ← String key, no TTL
- *    │ S session 1720000000000 token%3A42     │  ← String key with TTL
- *    │ L mylist -1 3 alpha beta gamma         │  ← List, 3 elements
- *    │ L queue 1720000000000 2 first second   │  ← List with TTL
- *    │ EOF                                    │  ← sentinel footer
- *    └────────────────────────────────────────┘
- *
- *    S line: S <enc_key> <expiry_ms_or_-1> <enc_value>
- *    L line: L <enc_key> <expiry_ms_or_-1> <count> <enc_elem0> <enc_elem1> ...
- *
- *    Backward compatibility: v1 files (no type prefix) are detected via the
- *    header line and loaded as all-string records.
- *
- * 4. EXPIRED-KEY FILTERING:
- *    On load, any record whose stored expiry_ms is in the past is silently discarded.
- *    This means the database is always in a consistent state regardless of how long
- *    the server was offline.
  */
 class PersistenceManager {
 public:

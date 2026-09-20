@@ -108,9 +108,6 @@ bool PersistenceManager::save(const Database& db, const std::string& path) {
             // Elements are stored in list order: index 0 (front/head) first.
             // On reload, we use rpush() to restore them in the same order.
             //
-            // INTERVIEW NOTE: The count field is redundant given that the loader
-            // reads exactly count space-separated tokens, but it makes the format
-            // self-describing and lets a human verify the file without parsing.
             ofs << "L "
                 << percent_encode(entry.key) << " "
                 << entry.expiry_ms           << " "

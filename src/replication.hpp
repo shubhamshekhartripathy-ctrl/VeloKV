@@ -21,13 +21,6 @@ namespace redis {
  * Leader:     accepts all writes; propagates each write to all replicas.
  * Replica:    read-only copy; keeps itself in sync by consuming the leader stream.
  *
- * INTERVIEW NOTE:
- * Real Redis calls these "master" and "replica" (renaming from "slave" in 5.0).
- * The role is set at startup via redis.conf or the REPLICAOF command. We use
- * CLI flags (--role leader|replica) for simplicity.
- *
- * INTERVIEW Q: Can a Redis replica have its own replicas?
- * A: Yes — "replica cascading" (replica-of-replica). We don't implement this.
  */
 enum class NodeRole {
     Standalone,
@@ -56,10 +49,6 @@ enum class NodeRole {
  * The 'synced' flag transitions to true the first time the output_buffer
  * drains to empty. It is used only for logging ("replica is now live").
  *
- * INTERVIEW NOTE:
- * Real Redis enforces a configurable output buffer limit per replica
- * (client-output-buffer-limit replica). If a replica falls too far behind,
- * the leader disconnects it. We do not implement backpressure.
  */
 struct ReplicaConnection {
     socket_t    fd;
@@ -131,47 +120,6 @@ struct ReplicaConnection {
  * Encoding: all tokens are percent-encoded:
  *   '%' → %25,  ' ' → %20,  '\r' → %0D,  '\n' → %0A
  *
- * INTERVIEW NOTE:
- * Real Redis uses RESP2 arrays for propagation and RDB binary format for the
- * full sync.  We use human-readable text for educational clarity.
- *
- * =========================================================================
- * CONSISTENCY GUARANTEES
- * =========================================================================
- *
- * Consistency model:  EVENTUAL CONSISTENCY
- *   - The leader acknowledges writes to clients BEFORE replicas confirm receipt
- *     (asynchronous replication — same default as Redis).
- *   - Replicas lag by roughly one network RTT.
- *   - Read-your-own-writes is NOT guaranteed across leader and replica.
- *
- * Ordering guarantee:
- *   - TCP delivers commands to each replica in the exact order they were
- *     applied on the leader.  No gaps, no reordering.
- *
- * Full-sync guarantee:
- *   - On connect, the replica receives a consistent snapshot of the leader's
- *     database.  All keys in the snapshot share the same logical point in time.
- *
- * Limitation — no partial resync:
- *   - A disconnected replica performs a full re-sync on reconnect (Redis does
- *     partial resync via PSYNC + a circular replication backlog).
- *
- * =========================================================================
- * THREAD MODEL
- * =========================================================================
- *
- * INTERVIEW Q: Why not use a background thread for replication I/O?
- * A: A background thread would require a mutex around the Database (shared
- *    between the event loop and the replication thread).  This adds latency
- *    (lock contention) and complexity (deadlock risk).  By integrating into
- *    the existing select() loop we get:
- *      1. Zero mutexes — no data races possible.
- *      2. Natural backpressure — writes queue in output_buffer; the event
- *         loop flushes them as fast as the socket allows.
- *      3. Simple, predictable code.
- *    This is exactly how Redis handles replication: single event loop, no
- *    separate replication thread.
  */
 class ReplicationManager {
 public:
@@ -332,10 +280,6 @@ private:
      *
      * Format: UPPERCASE_CMD enc_arg1 enc_arg2 ...\r\n
      *
-     * INTERVIEW NOTE: Real Redis serialises propagated commands as RESP arrays:
-     *   *3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$5\r\nvalue\r\n
-     * We use human-readable inline text to match the existing parser and to
-     * make the replication stream easy to inspect with a plain text editor.
      */
     static std::string encode_command(const Command& cmd);
 

@@ -104,10 +104,6 @@ std::string ReplicationManager::decode(const std::string& s) {
 std::string ReplicationManager::encode_command(const Command& cmd) {
     // Format: UPPERCASED_CMD enc_arg1 enc_arg2 ...\r\n
     //
-    // INTERVIEW NOTE:
-    // We uppercase the command name when propagating so replicas can reliably
-    // compare against "SET", "DEL", etc. without worrying about the original
-    // client's casing.
     std::string out;
     for (size_t i = 0; i < cmd.size(); ++i) {
         if (i > 0) out += ' ';
@@ -130,11 +126,6 @@ std::string ReplicationManager::build_full_sync(const Database& db) {
     // Snapshot the database.  db.snapshot() excludes expired keys and returns
     // typed entries (KeyType::String or KeyType::List).
     //
-    // INTERVIEW NOTE:
-    // Real Redis serialises the full sync as an RDB file streamed over the
-    // socket.  We use human-readable text lines for clarity.  The trade-off
-    // is verbosity vs. debuggability: you can 'cat redis.rdb | nc leader 6379'
-    // and inspect every field.
     std::vector<SnapshotEntry> entries = db.snapshot();
 
     std::string payload;
@@ -376,10 +367,6 @@ bool ReplicationManager::connect_to_leader(const std::string& host, int port) {
 #endif
 
     // ── Blocking connect ──────────────────────────────────────────────────
-    // INTERVIEW NOTE: We use blocking connect here for simplicity.  The OS will
-    // return ECONNREFUSED almost immediately if the leader is not listening.
-    // For a production system (or unreachable leader), use non-blocking connect
-    // with select()-based timeout.
     if (::connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
         std::cerr << "[Replication] Cannot connect to leader "
                   << host << ":" << port
@@ -566,10 +553,6 @@ bool ReplicationManager::apply_leader_line(const std::string& line, Database& db
     // command directly to the local database — bypassing CommandProcessor to
     // avoid triggering READONLY checks or re-propagation.
     //
-    // INTERVIEW NOTE: Real Redis applies propagated commands through the same
-    // command execution path as local commands, but with a special flag that
-    // suppresses client reply generation and further propagation.
-
     // Decode all tokens (keys/values are percent-encoded in the stream).
     Command decoded;
     decoded.reserve(tokens.size());

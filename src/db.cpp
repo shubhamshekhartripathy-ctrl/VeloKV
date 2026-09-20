@@ -162,8 +162,6 @@ std::pair<bool, std::string> Database::lpop(const std::string& key) {
     it->second.pop_front();
 
     // Auto-delete: Redis removes the key when the list becomes empty.
-    // INTERVIEW NOTE: "When we push elements into an empty key, a list is
-    // automatically created. When we pop the last element, the list disappears."
     if (it->second.empty()) {
         list_store_.erase(it);
         expiry_.erase(key);
@@ -304,10 +302,6 @@ std::vector<SnapshotEntry> Database::snapshot() const {
 // ---------------------------------------------------------------------------
 
 void Database::evict_expired() {
-    // INTERVIEW NOTE: We cannot erase from an unordered_map while iterating it
-    // (undefined behaviour in C++). Collect expired keys first, then erase.
-    // C++20's std::erase_if() handles this internally, but we target C++17.
-
     int64_t current_ms = now_ms();
     std::vector<std::string> to_evict;
 

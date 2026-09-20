@@ -157,9 +157,6 @@ void Server::start() {
         }
 
         // Add replication sockets (replica FDs on leader; leader FD on replica).
-        // INTERVIEW NOTE: By adding replication FDs to the SAME select() call we
-        // avoid any extra threads or synchronisation primitives.  The event loop
-        // handles client I/O and replication I/O in the same polling round.
         if (repl_mgr_ != nullptr) {
             repl_mgr_->register_fds(read_fds, write_fds, max_fd);
         }
@@ -273,9 +270,6 @@ void Server::stop() {
         return; // Already stopped — avoid double-save.
     }
 
-    // INTERVIEW NOTE: We save here (not in ~Server()) to ensure the Database
-    // is still fully alive when we serialise it.  Saving inside the destructor
-    // risks reading partially-destructed member objects.
     std::cout << "[Server] Saving database to '" << rdb_path_ << "'..." << std::endl;
     bool ok = PersistenceManager::save(db_, rdb_path_);
     if (!ok) {
@@ -361,9 +355,6 @@ void Server::handle_client_read(socket_t fd) {
         //   3. add_replica(rfd)   — ReplicationManager now owns the socket.
         //   4. return             — do NOT use `client` or `it` after erase.
         //
-        // INTERVIEW NOTE: Real Redis has a dedicated replica port and a separate
-        // registration command (REPLCONF).  We use a single-port approach with
-        // a magic keyword for simplicity.
         if (cmd_name == "REPLICAOF" && role_ == NodeRole::Leader && repl_mgr_ != nullptr) {
             std::cout << "[Server] Replica handshake on fd=" << fd
                       << ". Promoting to replica connection." << std::endl;
@@ -375,8 +366,6 @@ void Server::handle_client_read(socket_t fd) {
         }
 
         // ── READONLY guard (replica rejects client writes) ─────────────────
-        // INTERVIEW NOTE: Redis returns this exact error string on write commands
-        // issued to a replica.  Clients should direct all writes to the leader.
         if (role_ == NodeRole::Replica && is_write_command(cmd_name)) {
             client.queue_response(RESPParser::serialize_error(
                 "READONLY You can't write against a read only replica."));
@@ -394,9 +383,6 @@ void Server::handle_client_read(socket_t fd) {
         // write before sending it to replicas — so even if a replica is slow,
         // the local state is consistent.
         //
-        // INTERVIEW NOTE: Real Redis also propagates after local execution.
-        // It does NOT wait for replicas to acknowledge before replying to the
-        // client (async replication).  WAIT command can force synchronous acks.
         if (role_ == NodeRole::Leader && repl_mgr_ != nullptr && is_write_command(cmd_name)) {
             repl_mgr_->propagate(cmd);
         }

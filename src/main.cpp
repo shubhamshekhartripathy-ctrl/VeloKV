@@ -85,10 +85,6 @@ static bool has_flag(int argc, char* argv[], const std::string& flag) {
  *   --leader-port <N>                    Leader port  (replica only).
  *   --help                               Print this message and exit.
  *
- * INTERVIEW NOTE:
- * Real Redis is configured via redis.conf.  We use CLI flags for two reasons:
- *   1. Simpler to demonstrate in a test script (no config file management).
- *   2. Makes the role explicit and visible in the process list (ps aux).
  */
 int main(int argc, char* argv[]) {
 
@@ -191,11 +187,6 @@ int main(int argc, char* argv[]) {
     // in the very first select() call.  If the connection fails, the replica
     // starts anyway and retries via try_reconnect() inside the event loop.
     //
-    // INTERVIEW NOTE:
-    // Real Redis connects to the leader asynchronously: the replica starts
-    // accepting client connections immediately, then initiates the SYNC
-    // in the background.  Our blocking connect is simpler but equivalent for
-    // localhost testing.
     if (role == redis::NodeRole::Replica) {
         if (!repl_mgr.connect_to_leader(leader_host, leader_port)) {
             std::cout << "[Main] WARNING: Could not connect to leader at startup. "

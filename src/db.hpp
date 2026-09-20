@@ -18,14 +18,6 @@ namespace redis {
  * @enum KeyType
  * @brief Identifies the Redis type stored under a key.
  *
- * INTERVIEW NOTE:
- * Real Redis calls this the "encoding" or "type". The TYPE command returns one
- * of: string, list, hash, set, zset, stream. Our clone supports string and list.
- *
- * DESIGN: We expose KeyType so the command layer can perform WRONGTYPE checks
- * (Redis returns `-WRONGTYPE ...` when you call a list command on a string key).
- * The storage layer never returns RESP-encoded errors — that is the command
- * layer's responsibility.
  */
 enum class KeyType {
     None,   ///< Key does not exist (or has expired).
@@ -140,8 +132,6 @@ public:
      * Performs lazy expiry before the type lookup. Returns KeyType::None if the
      * key is absent or has expired.
      *
-     * INTERVIEW NOTE: This is the equivalent of the Redis TYPE command internally.
-     * Command handlers use this to enforce type safety before performing operations.
      */
     KeyType type_of(const std::string& key) const;
 
@@ -201,11 +191,6 @@ public:
      * @return The new length of the list after the push.
      * Time Complexity: O(1) — deque::push_front.
      *
-     * INTERVIEW NOTE: Real Redis LPUSH pushes to the head. After:
-     *   LPUSH mylist a
-     *   LPUSH mylist b
-     *   LPUSH mylist c
-     * The list is [c, b, a] (c was pushed last → it is at the head/left).
      */
     int64_t lpush(const std::string& key, const std::string& value);
 
@@ -306,9 +291,6 @@ public:
 
 private:
     // ── Two separate stores — one per value type ───────────────────────────
-    // INTERVIEW NOTE: This mirrors Redis's internal architecture where each
-    // data type has its own dictionary/encoding. A key exists in exactly one
-    // of these maps (never both).
     mutable std::unordered_map<std::string, std::string> string_store_;
     mutable std::unordered_map<std::string, RedisList>   list_store_;
 
