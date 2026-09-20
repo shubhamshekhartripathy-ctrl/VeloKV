@@ -6,11 +6,11 @@ CXXFLAGS = -std=c++17 -O2 -Wall -Wextra -Wpedantic -Isrc
 # Detect OS to handle platform-specific files and cleanup commands
 ifeq ($(OS),Windows_NT)
     LIBS      = -lws2_32
-    TARGET    = redis_server.exe
+    TARGET    = velokv_server.exe
     CLEAN_CMD = del /q /f src\*.o $(TARGET) redis.rdb.tmp 2>nul || exit 0
 else
     LIBS      =
-    TARGET    = redis_server
+    TARGET    = velokv_server
     CLEAN_CMD = rm -f src/*.o $(TARGET) redis.rdb.tmp
 endif
 

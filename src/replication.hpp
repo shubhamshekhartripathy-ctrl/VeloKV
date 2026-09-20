@@ -15,7 +15,7 @@ namespace redis {
 
 /**
  * @enum NodeRole
- * @brief Determines how this RapidKV instance participates in replication.
+ * @brief Determines how this VeloKV instance participates in replication.
  *
  * Standalone: single-node mode (default, backward-compatible).
  * Leader:     accepts all writes; propagates each write to all replicas.
@@ -97,7 +97,7 @@ struct ReplicaConnection {
 
 /**
  * @class ReplicationManager
- * @brief Orchestrates all replication I/O for a RapidKV node.
+ * @brief Orchestrates all replication I/O for a VeloKV node.
  *
  * =========================================================================
  * ARCHITECTURE

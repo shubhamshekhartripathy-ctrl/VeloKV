@@ -1,13 +1,13 @@
-# RapidKV
+# VeloKV
 
 [![Language](https://img.shields.io/badge/C%2B%2B-17-blue.svg?style=flat-square&logo=c%2B%2B)](https://en.cppreference.com/w/cpp/17)
 [![Category](https://img.shields.io/badge/Networking-TCP-orange.svg?style=flat-square)](https://en.wikipedia.org/wiki/Transmission_Control_Protocol)
 [![Category](https://img.shields.io/badge/Domain-Systems%20Programming-green.svg?style=flat-square)](https://en.wikipedia.org/wiki/Systems_programming)
 [![Category](https://img.shields.io/badge/Domain-Distributed%20Systems-red.svg?style=flat-square)](https://en.wikipedia.org/wiki/Distributed_computing)
 
-RapidKV is a Redis-inspired, high-performance, in-memory key-value database written in modern C++17. It features a custom TCP server implementation, a custom RESP command parser, list operations, TTL-based key expiration, crash-safe snapshot persistence, and single-leader replication.
+VeloKV is a Redis-inspired, high-performance, in-memory key-value database written in modern C++17. It features a custom TCP server implementation, a custom RESP command parser, list operations, TTL-based key expiration, crash-safe snapshot persistence, and single-leader replication.
 
-Built using native socket APIs, RapidKV is designed to run as a single-threaded event loop utilizing I/O multiplexing (`select`), replicating Redis’s clean, lock-free execution model.
+Built using native socket APIs, VeloKV is designed to run as a single-threaded event loop utilizing I/O multiplexing (`select`), replicating Redis’s clean, lock-free execution model.
 
 ---
 
@@ -24,7 +24,7 @@ Built using native socket APIs, RapidKV is designed to run as a single-threaded 
 
 ## System Architecture
 
-RapidKV utilizes a single-threaded event-loop architecture to process network connections, execute transactions, and replicate data downstream without the synchronization overhead and race conditions of multi-threaded databases.
+VeloKV utilizes a single-threaded event-loop architecture to process network connections, execute transactions, and replicate data downstream without the synchronization overhead and race conditions of multi-threaded databases.
 
 ### Request & Propagation Lifecycle
 
@@ -77,7 +77,7 @@ RapidKV utilizes a single-threaded event-loop architecture to process network co
 ```
 
 ### Beginner-Friendly Architectural Overview
-1. **Network Input:** Clients connect to RapidKV via TCP. The server listens on a designated port.
+1. **Network Input:** Clients connect to VeloKV via TCP. The server listens on a designated port.
 2. **The Multiplexer (`select`):** Instead of spawning a thread per client (which wastes memory and CPU time), a single thread sits in a loop. The operating system notifies this loop whenever any socket has incoming data to read or is ready to receive data.
 3. **Parsing & Execution:** Incoming raw bytes are read into a buffer and parsed via the RESP (REdis Serialization Protocol) engine. The command is routed to the `Database` store.
 4. **Data Sync & Replication:** If it is a write command and the database role is set to `leader`, the update is committed locally and appended to the replication buffers of all registered downstream `replica` sockets. If the database role is `replica`, direct write attempts from external clients are rejected.
@@ -113,7 +113,7 @@ RapidKV utilizes a single-threaded event-loop architecture to process network co
 
 - **`std::unordered_map`:** Used for O(1) average lookup. One map acts as the primary key-value store, and a secondary map indexes key absolute deadlines (epoch-based milliseconds) to handle TTLs.
 - **`std::deque`:** Chosen for list-type commands. Offers O(1) insertions and deletions at both the beginning and the end, which aligns perfectly with `LPUSH`/`RPUSH` and `LPOP`/`RPOP` performance demands.
-- **TCP Sockets:** Form the network layer. RapidKV configures non-blocking sockets and monitors their readability and writeability states.
+- **TCP Sockets:** Form the network layer. VeloKV configures non-blocking sockets and monitors their readability and writeability states.
 - **I/O Multiplexing (Single-Threaded Event Loop):** Uses `select()` to manage all concurrent client connections, leader handshakes, and replica synchronizations on a single thread. This avoids context-switching, thread creation overhead, and race conditions.
 - **Crash-Safe Serialization:** Serializes the database snapshot to a temp file (`.rdb.tmp`) and uses an atomic file rename operation (`std::rename`) to swap it with the main database file (`.rdb`).
 - **Replication Manager:** Uses socket promotion (fd stealing) via custom reference releases (`Client::release()`) to move replica connections out of the standard client pool into a dedicated downstream replication pipeline.
@@ -125,7 +125,7 @@ RapidKV utilizes a single-threaded event-loop architecture to process network co
 ```
 d:/redis/
 ├── Makefile                       # Platform-aware compilation instructions
-├── redis_server.exe               # Compiled executable (Windows/Winsock2)
+├── velokv_server.exe               # Compiled executable (Windows/Winsock2)
 └── src/
     ├── main.cpp                   # Bootstrap, CLI flag parsing, server setup
     ├── common.hpp / .cpp          # OS-specific socket abstractions (Windows/Linux)
@@ -153,22 +153,22 @@ make clean
 make
 ```
 
-### Running RapidKV
+### Running VeloKV
 
 #### 1. Standalone Mode
 Start the database server on port 6379:
 ```bash
-./redis_server --port 6379 --rdb redis.rdb
+./velokv_server --port 6379 --rdb redis.rdb
 ```
 
 #### 2. Replication Mode
 Start a leader server and one or more replica nodes pointing to it:
 ```bash
 # Start Leader (Port 6379)
-./redis_server --role leader --port 6379 --rdb leader.rdb
+./velokv_server --role leader --port 6379 --rdb leader.rdb
 
 # Start Replica (Port 6380, connects to Leader)
-./redis_server --role replica --port 6380 --leader-host 127.0.0.1 --leader-port 6379 --rdb replica.rdb
+./velokv_server --role replica --port 6380 --leader-host 127.0.0.1 --leader-port 6379 --rdb replica.rdb
 ```
 
 ---
@@ -211,7 +211,7 @@ job_0
 
 ## Key Learnings & Engineering Takeaways
 
-Building RapidKV offered valuable hands-on experience in low-level systems design and networking:
+Building VeloKV offered valuable hands-on experience in low-level systems design and networking:
 
 1. **Bare-Metal Socket Programming:** Writing networking code from scratch using `socket`, `bind`, `listen`, `accept`, `send`, and `recv` solidified a practical understanding of the TCP/IP stack.
 2. **I/O Multiplexing & Event Loops:** Implementing a custom server using `select()` demystified how high-concurrency servers handle thousands of concurrent file descriptors without running into thread context-switching bottlenecks.

@@ -1,0 +1,21 @@
+# Compiled object files
+src/*.o
+
+# Executables
+*.exe
+velokv_server
+redis_server
+
+# Database dumps
+*.rdb
+*.rdb.tmp
+
+# Logs
+logs/
+*.txt
+
+# IDE / OS files
+.vscode/
+.idea/
+*.DS_Store
+Thumbs.db

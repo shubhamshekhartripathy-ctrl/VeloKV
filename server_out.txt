@@ -1,7 +1,0 @@
-[Main] Starting Redis-inspired key-value server...
-[Server] Listening on 127.0.0.1:6379
-[Server] Loading database from 'redis.rdb'...
-[Persistence] No existing database file found at 'redis.rdb'. Starting with empty database.
-[Server] Event loop started.
-[Server] New connection from 127.0.0.1:55837 (fd: 324)
-[Server] Client disconnected (fd: 324)

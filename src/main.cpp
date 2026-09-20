@@ -60,19 +60,19 @@ static bool has_flag(int argc, char* argv[], const std::string& flag) {
 // ---------------------------------------------------------------------------
 
 /**
- * @brief Entry point for RapidKV.
+ * @brief Entry point for VeloKV.
  *
  * CLI usage:
  *
  *   Standalone (default — backward compatible):
- *     redis_server.exe
- *     redis_server.exe --port 6379 --rdb redis.rdb
+ *     velokv_server.exe
+ *     velokv_server.exe --port 6379 --rdb redis.rdb
  *
  *   Leader mode:
- *     redis_server.exe --role leader --port 6379 --rdb redis_leader.rdb
+ *     velokv_server.exe --role leader --port 6379 --rdb redis_leader.rdb
  *
  *   Replica mode:
- *     redis_server.exe --role replica --port 6380 \
+ *     velokv_server.exe --role replica --port 6380 \
  *                      --leader-host 127.0.0.1 --leader-port 6379 \
  *                      --rdb redis_replica.rdb
  *
@@ -95,9 +95,9 @@ int main(int argc, char* argv[]) {
     // ── Help ──────────────────────────────────────────────────────────────
     if (has_flag(argc, argv, "--help")) {
         std::cout <<
-            "RapidKV — Redis-inspired in-memory key-value store\n\n"
+            "VeloKV — Redis-inspired in-memory key-value store\n\n"
             "Usage:\n"
-            "  redis_server.exe [options]\n\n"
+            "  velokv_server.exe [options]\n\n"
             "Options:\n"
             "  --role <leader|replica|standalone>  Node role (default: standalone)\n"
             "  --port <N>                          Listen port (default: 6379)\n"
@@ -108,11 +108,11 @@ int main(int argc, char* argv[]) {
             "  --help                              Show this help\n\n"
             "Examples:\n"
             "  # Standalone\n"
-            "  redis_server.exe\n\n"
+            "  velokv_server.exe\n\n"
             "  # Leader on port 6379\n"
-            "  redis_server.exe --role leader --port 6379 --rdb redis_leader.rdb\n\n"
+            "  velokv_server.exe --role leader --port 6379 --rdb redis_leader.rdb\n\n"
             "  # Replica on port 6380\n"
-            "  redis_server.exe --role replica --port 6380 \\\n"
+            "  velokv_server.exe --role replica --port 6380 \\\n"
             "                   --leader-host 127.0.0.1 --leader-port 6379 \\\n"
             "                   --rdb redis_replica.rdb\n";
         return 0;
@@ -152,7 +152,7 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    std::cout << "[Main] Starting RapidKV — "
+    std::cout << "[Main] Starting VeloKV — "
               << role_str << " mode, port=" << port
               << ", rdb=" << rdb_path << std::endl;
 
@@ -210,6 +210,6 @@ int main(int argc, char* argv[]) {
     g_server = nullptr;
     redis::cleanup_network();
 
-    std::cout << "[Main] RapidKV shutdown complete." << std::endl;
+    std::cout << "[Main] VeloKV shutdown complete." << std::endl;
     return 0;
 }
