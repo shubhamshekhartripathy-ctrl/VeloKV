@@ -1,229 +1,201 @@
 # VeloKV
 
-[![Language](https://img.shields.io/badge/C%2B%2B-17-blue.svg?style=flat-square&logo=c%2B%2B)](https://en.cppreference.com/w/cpp/17)
-[![Category](https://img.shields.io/badge/Networking-TCP-orange.svg?style=flat-square)](https://en.wikipedia.org/wiki/Transmission_Control_Protocol)
-[![Category](https://img.shields.io/badge/Domain-Systems%20Programming-green.svg?style=flat-square)](https://en.wikipedia.org/wiki/Systems_programming)
-[![Category](https://img.shields.io/badge/Domain-Distributed%20Systems-red.svg?style=flat-square)](https://en.wikipedia.org/wiki/Distributed_computing)
+[![C++17](https://img.shields.io/badge/C%2B%2B-17-blue.svg?style=flat-square&logo=c%2B%2B)](https://en.cppreference.com/w/cpp/17)
+[![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux-lightgrey.svg?style=flat-square)](https://en.wikipedia.org/wiki/Cross-platform_software)
+[![Networking](https://img.shields.io/badge/Networking-Raw%20TCP%20Sockets-orange.svg?style=flat-square)](https://en.wikipedia.org/wiki/Transmission_Control_Protocol)
+[![Domain](https://img.shields.io/badge/Domain-Systems%20Programming-green.svg?style=flat-square)](https://en.wikipedia.org/wiki/Systems_programming)
 
-VeloKV is a Redis-inspired, high-performance, in-memory key-value database written in modern C++17. It features a custom TCP server implementation, a custom RESP command parser, list operations, TTL-based key expiration, crash-safe snapshot persistence, and single-leader replication.
-
-Built using native socket APIs, VeloKV is designed to run as a single-threaded event loop utilizing I/O multiplexing (`select`), replicating Redis’s clean, lock-free execution model.
+VeloKV is a high-performance, in-memory key-value store built from the ground up in C++17. Inspired by Redis, it implements a fully custom TCP networking stack using raw OS socket APIs, a RESP protocol parser, TTL-based key expiration with LRU eviction, crash-safe persistence, and a single-leader replication pipeline — all running on a single-threaded, non-blocking event loop.
 
 ---
 
-## Key Features
+## Why VeloKV?
 
-- **In-Memory Store:** High-performance, O(1) string and list storage using optimized standard library containers.
-- **I/O Multiplexed TCP Server:** Handles multiple concurrent client connections on a single thread using the `select()` system call.
-- **Redis-Style List Commands:** Supports double-ended queues for push, pop, and length queries.
-- **Key Expiration (TTL):** Evicts expired keys using a hybrid approach—**lazy eviction** (evict on read) combined with an **active sweep** (periodic scanning).
-- **Crash-Safe Persistence:** Periodically dumps database state to disk. Uses a safe write-to-temp and atomic rename strategy to prevent file corruption during crashes.
-- **Leader–Replica Replication:** One leader process propagates live write commands to multiple read-only replica nodes. Replicas auto-handshake, download the initial database state via full sync, and automatically reconnect upon leader crash/recovery.
+Most developers interact with databases through high-level SDKs that abstract away the networking and storage layers entirely. VeloKV was built to understand what happens *underneath* — how bytes travel from a client socket to an in-memory hash map, how data survives a server crash, and how two independent processes stay in sync over a TCP connection.
 
 ---
 
-## System Architecture
+## Features
 
-VeloKV utilizes a single-threaded event-loop architecture to process network connections, execute transactions, and replicate data downstream without the synchronization overhead and race conditions of multi-threaded databases.
+| Feature | Details |
+|---|---|
+| **Event-Driven Server** | Single-threaded `select()`-based event loop handles all client I/O without spawning threads |
+| **String & List Storage** | O(1) operations backed by `std::unordered_map` and `std::deque` |
+| **LRU Eviction** | Memory-bounded store using a Hash Map + Doubly-Linked List LRU cache |
+| **TTL Expiration** | Hybrid expiry: lazy eviction on read + periodic active sweep |
+| **Crash-Safe Snapshots** | Atomic temp-file + rename strategy prevents corrupt saves on power loss |
+| **Leader-Follower Replication** | Live write propagation to read-only replicas with auto-reconnect |
+| **Cross-Platform** | Compiles on both Windows (Winsock2) and POSIX systems (Linux/macOS) |
 
-### Request & Propagation Lifecycle
+---
+
+## How It Works
+
+VeloKV avoids the complexity of multi-threaded programming entirely. Instead of spawning one thread per client connection (which incurs memory overhead and context-switching costs), it uses a single-threaded event loop:
 
 ```
-                     +----------------------------+
-                     |    Client (Telnet/nc/App)  |
-                     +--------------+-------------+
-                                    |
-                             [ TCP Connection ]
-                                    |
-                                    v
-                     +----------------------------+
-                     |   TCP Socket Multiplexer   |
-                     |         (select)           |
-                     +--------------+-------------+
-                                    |
-                                    v
-                     +----------------------------+
-                     |   RESP Command Parser      |
-                     +--------------+-------------+
-                                    |
-                                    v
-                     +----------------------------+
-                     |      Command Processor     |
-                     +--------------+-------------+
-                                    |
-           +------------------------+------------------------+
-           | (Read commands)                                 | (Write commands)
-           v                                                 v
-+--------------------+                             +--------------------+
-|  Database Engine   |                             |  Database Engine   |
-| (GET / TTL / LLEN) |                             | (SET / DEL / LPUSH)|
-+--------------------+                             +----------+---------+
-                                                              |
-                                                    [ Local Commit & Save ]
-                                                              |
-                                                              v
-                                                   +--------------------+
-                                                   | ReplicationManager |
-                                                   |  (Leader Node)     |
-                                                   +----------+---------+
-                                                              |
-                                                     [ TCP Replication ]
-                                                              |
-                                                              v
-                                                   +--------------------+
-                                                   |  Replica Instance  |
-                                                   |   (Read-Only DB)   |
-                                                   +--------------------+
+Client sends a command
+        |
+        v
+[OS kernel buffers bytes on the TCP socket]
+        |
+        v
+[select() wakes up the event loop — "this socket is readable"]
+        |
+        v
+[RESP Parser reads & decodes the raw bytes into a Command]
+        |
+     +--+--+
+     |     |
+  (Read)  (Write)
+     |     |
+     v     v
+[Database Engine: std::unordered_map / std::deque]
+           |
+     [Write command?]
+           |
+           v
+  [ReplicationManager streams command to all replica sockets]
 ```
 
-### Beginner-Friendly Architectural Overview
-1. **Network Input:** Clients connect to VeloKV via TCP. The server listens on a designated port.
-2. **The Multiplexer (`select`):** Instead of spawning a thread per client (which wastes memory and CPU time), a single thread sits in a loop. The operating system notifies this loop whenever any socket has incoming data to read or is ready to receive data.
-3. **Parsing & Execution:** Incoming raw bytes are read into a buffer and parsed via the RESP (REdis Serialization Protocol) engine. The command is routed to the `Database` store.
-4. **Data Sync & Replication:** If it is a write command and the database role is set to `leader`, the update is committed locally and appended to the replication buffers of all registered downstream `replica` sockets. If the database role is `replica`, direct write attempts from external clients are rejected.
+When a replica connects to the leader, it first performs a full-sync handshake — the leader serializes its entire in-memory state to disk and streams it over. After the initial sync, all subsequent write commands are propagated live over the same persistent TCP connection.
 
 ---
 
 ## Supported Commands
 
-### Keys & Strings
-- `SET <key> <value>`: Sets the value of a key.
-- `GET <key>`: Returns the value of a key, or `nil` if it does not exist.
-- `DEL <key>`: Deletes a key from the database.
-- `EXISTS <key>`: Returns `1` if the key exists; `0` otherwise.
+### String Operations
+```
+SET   <key> <value>    — Store a string value
+GET   <key>            — Retrieve a value (returns nil if missing or expired)
+DEL   <key>            — Remove a key from the store
+EXISTS <key>           — Check if a key is present (1 = yes, 0 = no)
+```
 
-### Lists
-- `LPUSH <key> <value>`: Prepends a value to the head of the list.
-- `RPUSH <key> <value>`: Appends a value to the tail of the list.
-- `LPOP <key>`: Removes and returns the first element of the list.
-- `RPOP <key>`: Removes and returns the last element of the list.
-- `LLEN <key>`: Returns the length of the list.
+### List Operations
+```
+LPUSH <key> <value>    — Prepend a value to a list
+RPUSH <key> <value>    — Append a value to a list
+LPOP  <key>            — Remove and return the head element
+RPOP  <key>            — Remove and return the tail element
+LLEN  <key>            — Return the number of elements in a list
+```
 
-### Key Expirations
-- `EXPIRE <key> <seconds>`: Sets a timeout on a key in seconds.
-- `TTL <key>`: Returns the remaining time-to-live of a key in seconds (`-1` if no TTL exists, `-2` if key is not found).
+### Expiration
+```
+EXPIRE <key> <seconds> — Set a time-to-live on a key
+TTL    <key>           — Get remaining lifetime (-1: no TTL, -2: key not found)
+```
 
-### System & Administration
-- `PING`: Returns `PONG`.
-- `SAVE`: Synchronously dumps the current memory snapshot to disk.
-
----
-
-## Core Data Structures & Concepts Used
-
-- **`std::unordered_map`:** Used for O(1) average lookup. One map acts as the primary key-value store, and a secondary map indexes key absolute deadlines (epoch-based milliseconds) to handle TTLs.
-- **`std::deque`:** Chosen for list-type commands. Offers O(1) insertions and deletions at both the beginning and the end, which aligns perfectly with `LPUSH`/`RPUSH` and `LPOP`/`RPOP` performance demands.
-- **TCP Sockets:** Form the network layer. VeloKV configures non-blocking sockets and monitors their readability and writeability states.
-- **I/O Multiplexing (Single-Threaded Event Loop):** Uses `select()` to manage all concurrent client connections, leader handshakes, and replica synchronizations on a single thread. This avoids context-switching, thread creation overhead, and race conditions.
-- **Crash-Safe Serialization:** Serializes the database snapshot to a temp file (`.rdb.tmp`) and uses an atomic file rename operation (`std::rename`) to swap it with the main database file (`.rdb`).
-- **Replication Manager:** Uses socket promotion (fd stealing) via custom reference releases (`Client::release()`) to move replica connections out of the standard client pool into a dedicated downstream replication pipeline.
+### Utility
+```
+PING   — Healthcheck; returns PONG
+SAVE   — Trigger an immediate snapshot of the database to disk
+```
 
 ---
 
 ## Project Structure
 
 ```
-d:/redis/
-├── Makefile                       # Platform-aware compilation instructions
-├── velokv_server.exe               # Compiled executable (Windows/Winsock2)
+VeloKV/
+├── Makefile
 └── src/
-    ├── main.cpp                   # Bootstrap, CLI flag parsing, server setup
-    ├── common.hpp / .cpp          # OS-specific socket abstractions (Windows/Linux)
-    ├── client.hpp / .cpp          # Connection buffers and FD ownership releases
-    ├── db.hpp / .cpp              # Database storage engine (Strings, Lists, and TTL maps)
-    ├── command.hpp / .cpp         # Command router, write command classifications
-    ├── resp.hpp / .cpp            # RESP protocol parser and serialization helper
-    ├── persistence.hpp / .cpp     # Human-readable atomic file save/load utilities
-    ├── server.hpp / .cpp          # Core socket listener and select() multiplexer loop
-    └── replication.hpp / .cpp     # Leader connection pools and replica client managers
+    ├── main.cpp             — Entry point, CLI argument parsing, signal handling
+    ├── common.hpp / .cpp    — Cross-platform socket abstractions (Winsock / POSIX)
+    ├── server.hpp / .cpp    — Event loop, select() multiplexer, connection lifecycle
+    ├── client.hpp / .cpp    — Per-connection read/write buffers, socket FD ownership
+    ├── resp.hpp / .cpp      — RESP protocol parser and response serializer
+    ├── command.hpp / .cpp   — Command dispatch table and execution logic
+    ├── db.hpp / .cpp        — Core storage engine: strings, lists, TTL, LRU cache
+    ├── persistence.hpp/.cpp — Atomic snapshot save/load (temp file + rename)
+    └── replication.hpp/.cpp — Leader/replica handshake, sync, and propagation
 ```
 
 ---
 
-## Build & Run Instructions
+## Build & Run
 
-### Prerequisites
-- A C++17 compliant compiler (`g++` or `clang++`).
-- Build system (`make` or `mingw32-make` on Windows).
+### Requirements
+- C++17 compiler: `g++` or `clang++`
+- `make` (Linux/macOS) or `mingw32-make` (Windows)
 
-### Compilation
-Build the executable from the project root:
+### Compile
 ```bash
-make clean
-make
+make clean && make
 ```
 
-### Running VeloKV
-
-#### 1. Standalone Mode
-Start the database server on port 6379:
+### Run: Standalone Mode
 ```bash
-./velokv_server --port 6379 --rdb redis.rdb
+./velokv_server --port 6379 --rdb store.rdb
 ```
 
-#### 2. Replication Mode
-Start a leader server and one or more replica nodes pointing to it:
+### Run: Replication Mode
 ```bash
-# Start Leader (Port 6379)
+# Terminal 1 — Leader
 ./velokv_server --role leader --port 6379 --rdb leader.rdb
 
-# Start Replica (Port 6380, connects to Leader)
+# Terminal 2 — Replica
 ./velokv_server --role replica --port 6380 --leader-host 127.0.0.1 --leader-port 6379 --rdb replica.rdb
 ```
 
 ---
 
-## Example Usage
+## Quick Demo
 
-Connect to the running database instance using standard tools such as `netcat` (`nc`) or `telnet`:
+Connect with `netcat` and issue commands directly:
 
-### Working with Strings & TTL
 ```bash
 $ nc 127.0.0.1 6379
-SET username dev_user
+
+SET session_token abc123
 +OK
-GET username
-$8
-dev_user
-EXPIRE username 10
-:1
-TTL username
-:8
-```
 
-### Working with Lists
-```bash
-$ nc 127.0.0.1 6379
-RPUSH queue job_1
+GET session_token
+$6
+abc123
+
+EXPIRE session_token 30
 :1
-RPUSH queue job_2
+
+TTL session_token
+:28
+
+RPUSH tasks "send_email"
+:1
+
+RPUSH tasks "generate_report"
 :2
-LPUSH queue job_0
-:3
-LLEN queue
-:3
-LPOP queue
-$5
-job_0
+
+LLEN tasks
+:2
+
+LPOP tasks
+$10
+send_email
 ```
 
 ---
 
-## Key Learnings & Engineering Takeaways
+## Design Decisions
 
-Building VeloKV offered valuable hands-on experience in low-level systems design and networking:
+**Why a single-threaded event loop?**
+Threads are expensive — each thread on Linux consumes ~8MB of stack space by default, and the OS spends real CPU time context-switching between them. A single-threaded event loop with non-blocking I/O achieves the same concurrency without any of that overhead. This is the same model used by Redis, Nginx, and Node.js.
 
-1. **Bare-Metal Socket Programming:** Writing networking code from scratch using `socket`, `bind`, `listen`, `accept`, `send`, and `recv` solidified a practical understanding of the TCP/IP stack.
-2. **I/O Multiplexing & Event Loops:** Implementing a custom server using `select()` demystified how high-concurrency servers handle thousands of concurrent file descriptors without running into thread context-switching bottlenecks.
-3. **Memory Ownership & Lifetime:** Implementing features like socket FD promotion (`Client::release()`) required careful management of system resources to prevent leaks, double-closes, and dangling descriptors.
-4. **Consistency in Replication:** Designing a master-slave replication pipeline exposed the trade-offs of asynchronous replication, synchronization order, and the complexities of network partitions.
-5. **Robust File I/O:** Implementing snapshot-based database saving using the temp-and-rename pattern taught the importance of building fail-safe operations in application storage engines.
+**Why `select()` instead of `epoll`?**
+`epoll` is more scalable (O(1) vs O(N) per event loop tick) but is Linux-only. `select()` works identically on Windows and POSIX, keeping VeloKV portable across development environments. Migrating the multiplexer to `epoll` on Linux is a natural next step for production deployment.
+
+**Why atomic file rename for persistence?**
+If the server crashes halfway through writing a snapshot, a half-written file is worse than no file at all. By writing to a temporary file first and then atomically swapping it in with `rename()`, we guarantee the on-disk state is always either the old valid snapshot or the new one — never a corrupted in-between state.
+
+**Why an LRU eviction policy?**
+The store has a configurable memory capacity. When it fills up, the Least Recently Used key is evicted to make room for new data. This is implemented with a doubly-linked list (O(1) move-to-front on access) and a hash map (O(1) position lookup) — the classic O(1) LRU design.
 
 ---
 
-## Future Improvements
+## Potential Extensions
 
-- **Binary-Safe Protocol Parsing:** Upgrade the parser to handle full binary RESP payloads containing null bytes.
-- **Append-Only File (AOF):** Support log-based write durability to prevent data loss in the write-windows between periodic snapshot saves.
-- **Partial Replication (PSYNC):** Implement a circular replication backlog and global transaction offsets on the leader to perform incremental resynchronizations instead of full dumps on reconnection.
-- **Probabilistic TTL Sweeping:** Sample subsets of the TTL database rather than executing complete map scans to bound active eviction overhead to O(1) per tick.
+- **`epoll` / `kqueue` backend** — Replace `select()` with platform-native multiplexers for O(1) event dispatch
+- **Append-Only File (AOF)** — Log every write command to disk for finer-grained durability
+- **Partial Resync (PSYNC)** — Maintain a replication backlog on the leader so replicas can catch up without a full re-sync after a brief disconnect
+- **Binary-safe parsing** — Handle null bytes inside bulk string payloads
